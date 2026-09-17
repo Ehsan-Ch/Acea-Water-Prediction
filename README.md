@@ -1,129 +1,64 @@
-Acea Water Prediction — Code Purpose and Project Context
+# Acea Water Prediction
 
-📌 What Is This Code For?
+A Python hydrological-modelling project based on the Acea Water Prediction challenge. The published script defines a shared experiment structure for nine datasets covering aquifers, springs, a river and a lake.
 
-This code is a unified machine learning pipeline designed to process hydrological datasets. It automates data cleaning, preprocessing, feature engineering, and model training to forecast water levels and flow rates. The pipeline ensures consistency across multiple datasets (aquifers, rivers, lakes, springs) and evaluates predictive performance using metrics like MAE (Mean Absolute Error) and RMSE (Root Mean Squared Error).
+## Project scope
 
-🏢 What Project Is It Part Of?
+The code defines dataset-specific column mappings, target variables and a training/evaluation flow. Targets include groundwater depth, river hydrometry, lake level and spring flow rate.
 
-The code was developed for the Acea Water Prediction competition hosted on Kaggle. This project provided real-world hydrological data and asked participants to build models that could predict water availability across multiple water sources.
+The intended workflow combines data preparation, calendar features, lag/rolling features, chronological splitting and evaluation with mean absolute error (MAE) and root mean squared error (RMSE).
 
-🏭 Which Company Is Behind It?
+## Current repository status
 
-The datasets were released by Acea Group, a major Italian multi-utility company. Acea operates in water, energy, and environmental services, and manages water supply for millions of people in central Italy.
+This is an incomplete code snapshot. Several helper functions referenced by `Acea_Water.py` are not defined or imported in the published script, so it cannot currently run as a standalone pipeline.
 
-🎯 What Did the Company Want?
+The missing helpers are:
 
-Acea’s objective in launching the Kaggle challenge was to:
+- `list_found_files`
+- `robust_rename`
+- `coalesce_station_columns`
+- `parse_and_sort_date`
+- `forward_fill_exogenous`
+- `clip_outliers`
+- `add_time_features`
+- `add_lag_rolling`
+- `split_train_test`
+- `select_numeric_features`
+- `choose_model`
 
-Encourage data scientists to analyze hydrological time series data.
+The script imports gradient boosting, random forest and ElasticNet estimators. Model-selection behaviour depends on restoring `choose_model`; imports alone do not establish which experiments have been executed.
 
-Develop predictive models for groundwater depth, river hydrometry, lake levels, and spring flow rates.
+## Dataset configuration
 
-Generate actionable insights to optimize water resource management.
+| Dataset group | Configured datasets |
+| --- | --- |
+| Aquifers | Auser, Petrignano, Doganella, Luco |
+| Springs | Amiata, Madonna di Canneto, Lupa |
+| River | Arno |
+| Lake | Bilancino |
 
-Support sustainability and infrastructure planning by forecasting water availability more accurately.
+Expected CSV filenames and column mappings are listed in `EXPECTED_FILES` and `DATASETS_CFG` inside the script. The data is not included.
 
-✅ Summary
+## Dependencies and paths
 
-In short, this code is a solution pipeline for the Kaggle Acea Water Prediction competition. It was built to meet Acea Group’s request: create robust, reproducible models that can forecast water availability using diverse hydrological datasets.
+The code uses Python, pandas, NumPy and scikit-learn. The configured input paths are `/content/acea-water-prediction` and `/content`; adapt `BASE_PATHS` for a local environment.
 
-Acea Water Prediction — Unified Pipeline
+```bash
+python -m pip install numpy pandas scikit-learn
+```
 
-⚙️ How the Code Works
+Restore the missing functions before attempting:
 
-File Discovery
+```bash
+python Acea_Water.py
+```
 
-The pipeline looks for the expected CSV datasets (aquifers, rivers, lakes, springs) in the directories /content/acea-water-prediction or /content.
+## Evaluation considerations
 
-Helper functions like list_found_files() scan those paths and confirm which files are present.
+The script contains MAE/RMSE calculation and reporting logic, but this repository does not include verified benchmark results.
 
-Dataset Configuration
+The Lupa-specific routine replaces non-negative flow values with averages for the same day and month across years. This transformation, and any data-dependent preprocessing, should be reviewed against the forecast objective and fitted without using held-out data.
 
-Each dataset has a configuration (DATASETS_CFG) that specifies:
+## Next development steps
 
-Column renaming rules (rename_map)
-
-Target variable (e.g., groundwater depth, flow rate, lake level)
-
-Required columns
-
-Columns to use for modeling
-
-Preprocessing Utilities
-
-Functions like robust_rename, parse_and_sort_date, coalesce_station_columns standardize the data.
-
-Missing values are handled with forward_fill_exogenous.
-
-Outliers are clipped using clip_outliers.
-
-Time features (day of year sine/cosine, month) are added with add_time_features.
-
-Lag and rolling window features are generated with add_lag_rolling.
-
-Special Case: Lupa Dataset
-
-For Water_Spring_Lupa.csv, non‑negative flow values are replaced with the average of the same day/month across years.
-
-Negative values are preserved.
-
-Train/Test Split
-
-The data is split chronologically into training and testing sets using split_train_test.
-
-Numeric features are selected with select_numeric_features.
-
-Model Selection
-
-Different models are chosen depending on dataset type:
-
-Aquifers & Springs: Gradient Boosting Regressor
-
-Rivers: Random Forest Regressor
-
-Lakes: ElasticNet (with scaling pipeline)
-
-Training & Evaluation
-
-The chosen model is trained on the training set.
-
-Predictions are made on the test set.
-
-Performance is reported using MAE (Mean Absolute Error) and RMSE (Root Mean Squared Error).
-
-Main Runner
-
-The main() function loops through all datasets, applies preprocessing, trains models, and prints evaluation metrics.
-
-📚 Libraries You Need to Install
-
-Your code uses the following Python libraries:
-
-Core scientific stack:
-
-numpy → numerical computations
-
-pandas → data manipulation and CSV handling
-
-Machine learning (scikit-learn):
-
-scikit-learn → provides models (GradientBoosting, RandomForest, ElasticNet), metrics (MAE, RMSE), preprocessing (StandardScaler), and pipelines
-
-System utilities:
-
-os → file and directory handling
-
-re → regular expressions (used in file discovery)
-
-math → mathematical functions (e.g., square root)
-
-warnings → suppresses unnecessary warnings
-
-✅ Installation Commands
-
-Run these in your terminal or VS Code environment:
-
-pip install numpy pandas scikit-learn
-
-(The other modules like os, re, math, warnings are part of Python’s standard library, so you don’t need to install them separately.)
+Restore the helper functions, document the forecast horizon and data assumptions, fit transformations on training data, add a simple baseline, and save reproducible evaluation results with environment and split details.
