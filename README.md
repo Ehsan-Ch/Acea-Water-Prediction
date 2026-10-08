@@ -1,34 +1,41 @@
 # Acea Water Prediction
 
-A Python hydrological-modelling project based on the Acea Water Prediction challenge. The published script defines a shared experiment structure for nine datasets covering aquifers, springs, a river and a lake.
+A Python hydrological forecasting project based on the Acea Water Prediction
+challenge. It supports nine configured aquifer, spring, river and lake datasets.
 
-## Project scope
+## Current implementation
 
-The code defines dataset-specific column mappings, target variables and a training/evaluation flow. Targets include groundwater depth, river hydrometry, lake level and spring flow rate.
+The previously incomplete script now runs with explicit input and output paths.
+It uses calendar features, past observations, lagged values and rolling means,
+then fits a fixed gradient-boosted regressor on the first 80% of rows and evaluates
+the final 20%. Median imputation is fitted on training rows only.
 
-The intended workflow combines data preparation, calendar features, lag/rolling features, chronological splitting and evaluation with mean absolute error (MAE) and root mean squared error (RMSE).
+For each target date, features use observations strictly before that date.
+Evaluation is sequential **next-observation forecasting**, not a multi-day
+forecast issued all at once. Lag lengths count observations, so gaps in dates
+change the calendar horizon. Later test predictions may use earlier observed
+test values; model parameters remain fixed.
 
-## Current repository status
+The old full-dataset outlier clipping and Lupa target replacement were removed:
+they could use future data or change the values being evaluated. Targets retain
+their observed values, including positive Lupa measurements. Missing targets
+are excluded from fitting/scoring; features use past-only forward filling and
+training-only imputation. Missing required columns and duplicate dates fail
+with explicit errors.
 
-This is an incomplete code snapshot. Several helper functions referenced by `Acea_Water.py` are not defined or imported in the published script, so it cannot currently run as a standalone pipeline.
+## Run
 
-The missing helpers are:
+Use Python 3.11+ and a virtual environment:
 
-- `list_found_files`
-- `robust_rename`
-- `coalesce_station_columns`
-- `parse_and_sort_date`
-- `forward_fill_exogenous`
-- `clip_outliers`
-- `add_time_features`
-- `add_lag_rolling`
-- `split_train_test`
-- `select_numeric_features`
-- `choose_model`
+```bash
+python -m pip install -r requirements.txt
+python Acea_Water.py --data /path/to/acea-csvs --output artifacts
+python -m unittest discover -s tests -v
+```
 
-The script imports gradient boosting, random forest and ElasticNet estimators. Model-selection behaviour depends on restoring `choose_model`; imports alone do not establish which experiments have been executed.
-
-## Dataset configuration
+Place the supported CSV files directly inside `--data`. The script uses those
+present and exits with an error if none are found or any dataset fails. The data
+are not included; obtain them under the dataset's terms.
 
 | Dataset group | Configured datasets |
 | --- | --- |
@@ -37,28 +44,24 @@ The script imports gradient boosting, random forest and ElasticNet estimators. M
 | River | Arno |
 | Lake | Bilancino |
 
-Expected CSV filenames and column mappings are listed in `EXPECTED_FILES` and `DATASETS_CFG` inside the script. The data is not included.
+Expected filenames, column mappings and targets are in `DATASETS_CFG` in
+[Acea_Water.py](Acea_Water.py). Dates use day-first parsing. At least 365 training
+rows and a subsequent holdout are required; more history may be needed where
+target observations are missing.
 
-## Dependencies and paths
+Each dataset writes `metrics.json` and `predictions.csv` in its own output
+subdirectory. Metrics include MAE/RMSE for the model and a last-observation
+baseline, row counts and the split boundary. Use a fresh output directory to
+preserve earlier results.
 
-The code uses Python, pandas, NumPy and scikit-learn. The configured input paths are `/content/acea-water-prediction` and `/content`; adapt `BASE_PATHS` for a local environment.
+## Verification and limitations
 
-```bash
-python -m pip install numpy pandas scikit-learn
-```
+Four automated tests cover causal features, unchanged targets, invalid input
+and a synthetic end-to-end fit/export. They do not establish performance on the
+official Acea datasets. No real-data benchmark or improvement claim is made.
 
-Restore the missing functions before attempting:
-
-```bash
-python Acea_Water.py
-```
-
-## Evaluation considerations
-
-The script contains MAE/RMSE calculation and reporting logic, but this repository does not include verified benchmark results.
-
-The Lupa-specific routine replaces non-negative flow values with averages for the same day and month across years. This transformation, and any data-dependent preprocessing, should be reviewed against the forecast objective and fitted without using held-out data.
-
-## Next development steps
-
-Restore the helper functions, document the forecast horizon and data assumptions, fit transformations on training data, add a simple baseline, and save reproducible evaluation results with environment and split details.
+The fixed model has not been tuned per dataset. Source publication delays,
+irregular sampling and station-specific missing-data behavior need review for
+any real operational forecast. The 8 October 2026 repair was made with OpenAI
+Codex assistance; it is a correction to the public research code, not a new
+historical client result.

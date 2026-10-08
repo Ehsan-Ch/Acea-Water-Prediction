@@ -1,27 +1,15 @@
-# Acea Water Prediction — unified pipeline (Google Cloud /content ready)
-# Based on Kaggle's Acea Water Prediction challenge (Acea Group).
-# This pipeline standardizes multiple hydrological datasets (aquifers, rivers, lakes, springs),
-# applies preprocessing, and trains predictive models to forecast water levels and flows.
-
-import os
-import re
-import math
-import warnings
-warnings.filterwarnings('ignore')
+"""Acea forecasting with past-only features and a chronological holdout."""
+import argparse
+import json
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
-from sklearn.linear_model import ElasticNet
-from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-
-# Configure base path
-BASE_PATHS = ["/content/acea-water-prediction", "/content"]
-ARTIFACT_DIR = "/content/artifacts"
-os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
 EXPECTED_FILES = [
     "Aquifer_Auser.csv",
@@ -200,115 +188,104 @@ DATASETS_CFG = {
     },
 }
 
-# Lupa-specific preprocessing
-def lupa_replace_nonnegatives_with_daymonth_mean(df):
-    """
-    For Water_Spring_Lupa.csv:
-    Replace every non-negative flow_rate value with the average of the same day/month across all years.
-    Negative values remain unchanged.
-    """
-    df = df.copy()
-    if "date" not in df.columns or "flow_rate" not in df.columns:
-        return df
+# Forecasting uses only observations before each target date.
+def prepare_frame(frame, cfg):
+    frame = frame.rename(columns={str(c): str(c).strip() for c in frame.columns})
+    frame = frame.rename(columns=cfg['rename_map']).copy()
+    if frame.columns.duplicated().any():
+        raise ValueError('Duplicate column names after renaming')
+    missing = set(cfg['require_cols']) - set(frame.columns)
+    if missing:
+        raise ValueError(f'Missing required columns: {sorted(missing)}')
+    frame['date'] = pd.to_datetime(frame['date'], dayfirst=True, errors='raise')
+    if frame['date'].isna().any() or frame['date'].duplicated().any():
+        raise ValueError('Dates must be nonmissing and unique')
+    frame = frame.sort_values('date').reset_index(drop=True)
+    columns = [c for c in cfg['use_cols'] if c in frame and c != 'date']
+    for col in columns:
+        frame[col] = pd.to_numeric(frame[col], errors='raise')
+    frame = frame[['date'] + columns].replace([np.inf, -np.inf], np.nan)
+    return frame
 
-    df["month"] = df["date"].dt.month
-    df["day"] = df["date"].dt.day
 
-    # Compute reference means by (month, day), ignoring NaNs
-    ref = (
-        df.groupby(["month", "day"])["flow_rate"]
-          .mean()
-          .rename("ref_mean")
-          .reset_index()
-    )
-    df = df.merge(ref, on=["month", "day"], how="left")
+def build_features(frame, target):
+    """Predict the next observed row; current exogenous values are unavailable."""
+    features = pd.DataFrame(index=frame.index)
+    dates = frame['date']
+    features['month_sin'] = np.sin(2 * np.pi * dates.dt.month / 12)
+    features['month_cos'] = np.cos(2 * np.pi * dates.dt.month / 12)
+    features['day_of_year'] = dates.dt.dayofyear
+    for col in frame.select_dtypes(include='number').columns:
+        # Forward filling uses only previously observed values, never future rows.
+        past = frame[col].ffill().shift(1)
+        for lag in (1, 3, 7, 14, 30):
+            features[f'{col}_lag_{lag}'] = past.shift(lag - 1)
+        for window in (3, 7, 14, 30):
+            features[f'{col}_mean_{window}'] = past.rolling(window, min_periods=1).mean()
+    if f'{target}_lag_1' not in features:
+        raise ValueError(f'Target {target!r} is not numeric')
+    return features
 
-    # Replace only non-negative values
-    mask = df["flow_rate"].notna() & (df["flow_rate"] >= 0)
-    df.loc[mask, "flow_rate"] = df.loc[mask, "ref_mean"]
 
-    df = df.drop(columns=["ref_mean", "month", "day"])
-    return df
+def run_one(name, cfg, path, output=None, min_train=365):
+    """Fixed model and chronological holdout, with training-only imputation."""
+    frame = prepare_frame(pd.read_csv(path), cfg)
+    features = build_features(frame, cfg['target'])
+    cutoff = int(len(frame) * 0.8)
+    if cutoff < min_train or cutoff >= len(frame):
+        raise ValueError(f'Need at least {min_train} training rows and a holdout')
+    target = frame[cfg['target']]
+    baseline = features[f"{cfg['target']}_lag_1"]
+    train = (frame.index < cutoff) & target.notna() & baseline.notna()
+    test = (frame.index >= cutoff) & target.notna() & baseline.notna()
+    if train.sum() < min_train - 1 or test.sum() < 1:
+        raise ValueError('Insufficient observed targets after missing-value checks')
+    model = Pipeline([
+        ('impute', SimpleImputer(strategy='median', keep_empty_features=True)),
+        ('model', GradientBoostingRegressor(random_state=42)),
+    ])
+    model.fit(features.loc[train], target.loc[train])
+    prediction = model.predict(features.loc[test])
+    observed = target.loc[test]
+    report = {
+        'dataset': name, 'target': cfg['target'], 'train_rows': int(train.sum()),
+        'test_rows': int(test.sum()), 'train_end': str(frame.loc[train, 'date'].max().date()),
+        'test_start': str(frame.loc[test, 'date'].min().date()),
+        'mae': float(mean_absolute_error(observed, prediction)),
+        'rmse': float(np.sqrt(mean_squared_error(observed, prediction))),
+        'baseline_mae': float(mean_absolute_error(observed, baseline.loc[test])),
+        'baseline_rmse': float(np.sqrt(mean_squared_error(observed, baseline.loc[test]))),
+        'protocol': 'Sequential next-observation forecasting; fixed model; 80/20 chronological split',
+    }
+    if output is not None:
+        destination = Path(output) / Path(name).stem
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / 'metrics.json').write_text(json.dumps(report, indent=2) + '\n')
+        pd.DataFrame({'date': frame.loc[test, 'date'], 'actual': observed,
+                      'prediction': prediction, 'last_observed': baseline.loc[test]}).to_csv(
+                          destination / 'predictions.csv', index=False)
+    print(json.dumps(report, indent=2))
+    return report
 
-def preprocess_lupa(df):
-    """
-    Apply Lupa-specific preprocessing:
-    - Replace non-negative flow_rate values with day/month averages across years.
-    """
-    return lupa_replace_nonnegatives_with_daymonth_mean(df)
 
-# Main runner
-def run_one(name, cfg, path):
-    print(f"\n=== Processing {name} ({cfg['type']}) ===")
-    df = pd.read_csv(path)
-
-    # Standardize
-    df = robust_rename(df, cfg["rename_map"])
-    df = coalesce_station_columns(df)
-    df = parse_and_sort_date(df)
-    planned = [c for c in cfg["use_cols"] if c in df.columns]
-    if planned:
-        df = df[planned].copy()
-
-    # Drop rows missing required columns
-    req = [c for c in cfg["require_cols"] if c in df.columns]
-    if req:
-        df = df.dropna(subset=req)
-
-    # Apply Lupa-specific preprocessing
-    if name == "Water_Spring_Lupa.csv":
-        df = preprocess_lupa(df)
-
-    # Forward-fill exogenous
-    df = forward_fill_exogenous(df, cfg["target"])
-
-    # Clip outliers on exogenous + derived features (exclude date/target)
-    df = clip_outliers(df, exclude_cols=["date", cfg["target"]], zmax=4.0)
-
-    # Time features
-    df = add_time_features(df)
-
-    # Lags and rolling windows
-    exo_for_lags = [c for c in ["rainfall", "temperature", "drainage_volume", "river_hydrometry", "lake_outflow"] if c in df.columns]
-    df = add_lag_rolling(df, cfg["target"], exo_for_lags, lags=(1,3,7,14,30), windows=(3,7,14,30))
-
-    # Train/test split
-    train_df, test_df = split_train_test(df, cfg["target"], test_frac=0.2, min_train=365)
-
-    # Select features and drop NaNs from lag/rolling
-    feat_cols = select_numeric_features(train_df, cfg["target"])
-    train_df = train_df.dropna(subset=feat_cols + [cfg["target"]]).copy()
-    test_df = test_df.dropna(subset=feat_cols + [cfg["target"]]).copy()
-
-    if len(train_df) < 200 or len(test_df) < 30:
-        print(f"[{name}] Warning: small train/test after cleaning (train={len(train_df)}, test={len(test_df)}).")
-
-    # Train and evaluate
-    X_train, y_train = train_df[feat_cols], train_df[cfg["target"]]
-    X_test, y_test = test_df[feat_cols], test_df[cfg["target"]]
-
-    model = choose_model(cfg["type"])
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    mae = mean_absolute_error(y_test, y_pred)
-    rmse = math.sqrt(mean_squared_error(y_test, y_pred))
-    print(f"[{name}] MAE={mae:.4f} | RMSE={rmse:.4f}")
-
-def main():
-    print("Starting Acea Water Prediction pipeline (Google Cloud /content)...")
-    found_map = list_found_files()
-
-    for expected_name, cfg in DATASETS_CFG.items():
-        path = found_map.get(expected_name)
-        if not path:
-            print(f"[{expected_name}] Skipped: file not found in {BASE_PATHS}.")
-            continue
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Acea next-observation forecasting')
+    parser.add_argument('--data', type=Path, required=True, help='Directory containing official CSV files')
+    parser.add_argument('--output', type=Path, default=Path('artifacts'))
+    args = parser.parse_args(argv)
+    found = [(name, cfg, args.data / name) for name, cfg in DATASETS_CFG.items()
+             if (args.data / name).is_file()]
+    if not found:
+        parser.error('No supported Acea CSV files found in --data')
+    failures = []
+    for name, cfg, path in found:
         try:
-            run_one(expected_name, cfg, path)
-        except Exception as e:
-            print(f"[{expected_name}] Error during processing: {e}")
+            run_one(name, cfg, path, output=args.output)
+        except (ValueError, OSError) as exc:
+            failures.append(name)
+            print(f'{name}: {exc}', file=sys.stderr)
+    return 1 if failures else 0
 
-if __name__ == "__main__":
-    main()
-    
+
+if __name__ == '__main__':
+    raise SystemExit(main())
